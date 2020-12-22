@@ -1,0 +1,10 @@
+Connecting to host 128.187.49.42, port 5205
+[  6] local 128.187.49.40 port 54326 connected to 128.187.49.42 port 5205
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  6]   0.00-120.00 sec  42.4 GBytes  3.03 Gbits/sec    0    713 KBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  6]   0.00-120.00 sec  42.4 GBytes  3.03 Gbits/sec    0             sender
+[  6]   0.00-120.04 sec  42.4 GBytes  3.03 Gbits/sec                  receiver
+
+iperf Done.

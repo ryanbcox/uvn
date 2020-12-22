@@ -1,0 +1,6 @@
+IMB-P2P on em1 with 28 cores per node experienced a problem. It hung indefinitely until manually killed. This did not occur for other counts or for other interfaces. A bug is suspected in one of the following packages that were used:
+* Intel MPI Benchmarks
+* Intel MPI
+* Intel compilers
+
+The bug was never investigated.

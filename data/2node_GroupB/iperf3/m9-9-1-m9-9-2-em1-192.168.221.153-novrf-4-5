@@ -1,0 +1,10 @@
+Connecting to host 192.168.221.153, port 5203
+[  6] local 192.168.221.152 port 59242 connected to 192.168.221.153 port 5203
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  6]   0.00-60.00  sec  17.3 GBytes  2.48 Gbits/sec    3    821 KBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  6]   0.00-60.00  sec  17.3 GBytes  2.48 Gbits/sec    3             sender
+[  6]   0.00-60.04  sec  17.3 GBytes  2.48 Gbits/sec                  receiver
+
+iperf Done.

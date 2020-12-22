@@ -1,0 +1,10 @@
+Connecting to host 128.187.49.42, port 5207
+[  6] local 128.187.49.40 port 60412 connected to 128.187.49.42 port 5207
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  6]   0.00-120.00 sec  57.6 GBytes  4.13 Gbits/sec    0    629 KBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  6]   0.00-120.00 sec  57.6 GBytes  4.13 Gbits/sec    0             sender
+[  6]   0.00-120.03 sec  57.6 GBytes  4.13 Gbits/sec                  receiver
+
+iperf Done.

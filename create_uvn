@@ -1,0 +1,358 @@
+#!/bin/bash -ex
+
+# Author: Ryan Cox
+#
+# Copyright (C) 2020, Brigham Young University
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+# to whom the Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or
+# substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+# FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+# OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
+
+
+##### IMPORTANT VARIABLES TO SET #####
+
+EXCLUDE_BELOW_UID=1001 #This is the typical start of the UID range of human users (depends on distro). Exclude system users below here.
+
+# List the subnets that you want to have vxlan interfaces created for. Only
+# use the network IP. E.g. 192.168.19.13/23 should be 192.168.18.0.
+# IMPORTANT: Once in production, append *only* to this list so that port
+# numbering is not affected for existing subnets.
+SUBNETS=(128.187.49.0 192.168.14.0 192.168.128.0 192.168.144.0 192.168.203.0 192.168.212.0 192.168.216.0 192.168.14.0)
+
+# This is a UDP port that needs to be available. Each subnet needs a unique
+# port due to https://lore.kernel.org/netdev/BD89B7A5-AEA1-4DBD-BF4E-7330558162EF@online.net/t/#r20b972234d8c92042ad82a3d434aad33ad9def4b.
+# Choosing a different dstport DOES work (https://www.mail-archive.com/pve-devel@pve.proxmox.com/msg31244.html).
+# Pick a starting point for a range that is free of competition. The port
+# numbers increment for each subnet in $SUBNETS.
+STARTING_VXLAN_UDP_PORT=800
+
+
+
+##### OTHER VARIABLES #####
+
+# Can modify
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+STATE_DIR=/var/run/uvn
+MULTICAST_IP=239.192.193.194 # Arbitrary IP from RFC 2365 section 6.2 space
+
+# Do not modify
+CGNAT_SUBNET="100.64.0.0/10" #RFC 6598. Don't change this.
+CGNET_SUBNET_START_IP="100.64.0.0" #RFC 6598. Don't change this.
+
+
+
+##### FUNCTION DEFINITIONS #####
+
+# Code reuse may be a virtue in general, but requiring a third party package
+# solely for a lazy programmer to import a simple algorithm is infamy.
+function inet_aton() {
+	readarray -td. iparr <<<"$1"
+	local ipnum=0
+
+	for i in ${!iparr[@]}
+	do
+		ipnum=$(( $ipnum | (${iparr[$i]} << (24-$i*8)) ))
+	done
+
+	echo "$ipnum"
+}
+
+function inet_ntoa() {
+	local ipnum="$1"
+	local i=0
+
+	for (( i=0; i < 4; i++))
+	do
+		echo -n $(((ipnum >> (8*(3-i))) & 0xff ))
+		[[ $i -lt 3 ]] || break
+		echo -n "."
+	done
+	echo #not strictly required but nice when testing it outside of a script
+}
+
+function get_network_from_ip_and_mask() {
+	local ipnum=$(inet_aton "$1")
+	local mask="$2"
+
+	inet_ntoa $(( $ipnum & ( (2**$mask - 1) << (32-$mask) ) ))
+}
+
+function get_network_from_ip_slash_mask() {
+	get_network_from_ip_and_mask ${1%%/*} ${1##*/}
+}
+
+function move_process_to_vrfname() {
+	local pid="$1"
+	local vrfname="$2"
+
+	echo "Will add \"$pid\" to /run/cgroup2/vrf/\"$vrfname\"/cgroup.procs"
+	echo "$pid" > /run/cgroup2/vrf/"$vrfname"/cgroup.procs
+}
+
+function wait_wip() {
+	for (( i=0; i<100; i++ ))
+	do
+		[ ! -d "$state_dir_wip" ] && break
+		sleep .1
+	done
+	#TODO: Figure out what to do if we get here... that means that there is a
+	# partially-created setup and that isn't good. We can't just nuke the
+	# existing stuff if something is using it, plus we have to protect against
+	# races since 2+ new sessions might be waiting. We need to make sure that they
+	# both don't try to clean up and create the setup.
+}
+
+
+
+##### MAIN #####
+
+pid=$PPID
+
+if [[ -n "$PAM_TYPE" ]]
+then
+	#Do not run on close_session
+	[[ "$PAM_TYPE" == "close_session" ]] && exit 0
+	uid=$(id -u "$PAM_USER")
+elif [[ -n "$SLURM_JOB_UID" ]]
+then
+	uid="$SLURM_JOB_UID"
+else
+	#How did we get here? Should there be an error message and non-zero
+	# exit code? TODO
+	exit 0
+fi
+
+# Don't run this if my uid is below $EXCLUDE_BELOW_UID
+if (("$uid"<$EXCLUDE_BELOW_UID))
+then
+	exit 0
+fi
+
+
+
+##### AVOID DUPLICATION WITH PREVIOUS SESSIONS #####
+
+state_dir_wip="$STATE_DIR/$uid/wip"
+state_dir_ready="$STATE_DIR/$uid/ready"
+
+if [ -d "$state_dir_ready" ]
+then
+	move_process_to_vrfname $pid vrf$uid
+	exit 0
+fi
+
+# If another process is creating the namespace, let's wait up to 10 seconds for
+# it to succeed. It should not take even close to that long.
+if [ -d "$state_dir_wip" ]
+then
+	wait_wip
+fi
+
+mkdir -p -- "$STATE_DIR/$uid"
+mkdir -- "$state_dir_wip" || wait_wip # FIXME: what to do if there is still a problem?
+
+
+
+##### SET IMPORTANT SYSCTL PARAMETERS #####
+
+# Beware: https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt says
+# "This variable is special, its change resets all configuration parameters to
+# their default state (RFC1122 for hosts, RFC1812 for routers)". Should we be
+# doing this?
+# Allow routing. Just in case this wasn't done already
+sysctl -w net.ipv4.ip_forward=1
+# TODO need IPv6 equivalent when ready
+
+# Non-VRF-aware programs should listen on all VRFs. All non-user stuff goes in
+# the default VRF. sshd, etc listen in the default VRF and are thus accessible.
+sysctl -w net.ipv4.tcp_l3mdev_accept=1
+sysctl -w net.ipv4.udp_l3mdev_accept=1
+# sysctl -w net.ipv4.raw_l3mdev_accept=1 #FIXME I am including this here for reference. By default it is set to 1. Should I handle this?
+
+
+
+##### FIGURE OUT NETWORKING SETUP #####
+
+# Collect information related to interface with the default gateway
+read -r -a routeget <<<"$(ip route get 1.1.1.1 |head -1)"
+default_out_interface=${routeget[4]}
+default_out_ip=${routeget[6]}
+default_out_mask=$(ip -4 addr show dev $default_out_interface | awk -F"[ /]+" '$2 == "inet" && $3 == "'$default_out_ip'" {print $4}') #seems ugly. There must be a better way. FIXME
+default_out_network=$(get_network_from_ip_and_mask $default_out_ip $default_out_mask)
+default_out_mac=$(<"/sys/class/net/$default_out_interface/address")
+
+# Pick UDP ports for each subnet.
+declare -A dstport_by_subnet
+vxlan_port=$STARTING_VXLAN_UDP_PORT
+for subnet in ${SUBNETS[@]}
+do
+	dstport_by_subnet[$subnet]=$((vxlan_port++))
+done
+
+# Find devices with addresses in subnets listed in dstport_by_subnet.
+# This would be much less complicated if we didn't have to use unique dstports
+# per VNI.
+declare -a list_interfaces
+declare -a list_dstports
+declare -a list_addresses
+for device in /sys/class/net/*
+do
+	[[ -d "$device" ]] || continue # directories only
+	grep -q DEVTYPE=vxlan $device/uevent && continue #exclude other vxlan
+	[[ "$(<$device/operstate)" == "down" ]] && continue #exclude down
+
+	ifname=$(basename $device)
+
+	#read in then iterate through all v4 address lines in ip addr
+	mapfile -t ipaddrs < <(ip -o -4 addr show $ifname)
+	for line in "${ipaddrs[@]}"
+	do
+		read -r -a fields <<<"$line"
+		[[ "${fields[2]}" == "inet" ]] || continue #already filtered with -4 but, just to be safe...
+		net=$(get_network_from_ip_slash_mask ${fields[3]})
+		dstport=${dstport_by_subnet[$net]} #get dstport for the subnet
+		[[ -z "$dstport" ]] && continue # skip if none found
+		list_interfaces+=($ifname)
+		list_dstports+=(${dstport_by_subnet[$net]})
+		list_addresses+=(${fields[3]})
+	done
+	# TODO need IPv6 equivalent
+done
+
+
+
+##### SET UP NAT AND IPTABLES FORWARDING ACCEPT RULES #####
+
+# Set up NAT. The /32 addresses are all within the /10 so let's just use that
+# for the iptables rules since it won't hurt anything unless CGNAT was already
+# in use, but the sysadmin setting this up should already be aware of an
+# unlikely conflict like that.
+iptables -t nat -C POSTROUTING -s $CGNAT_SUBNET -o $default_out_interface -j SNAT --to-source $default_out_ip >/dev/null 2>&1 || \
+  iptables -t nat -I POSTROUTING -s $CGNAT_SUBNET -o $default_out_interface -j SNAT --to-source $default_out_ip
+# TODO need IPv6 equivalent
+
+# Make sure that forwarding works to and from the /10. This really only matters
+# if the FORWARD chain policy is set to something other than ACCEPT, or a rule
+# in FORWARD is dropping the packets
+iptables -C FORWARD -s $CGNAT_SUBNET -j ACCEPT || \
+  iptables -I FORWARD -s $CGNAT_SUBNET -j ACCEPT
+iptables -C FORWARD -d $CGNAT_SUBNET -j ACCEPT || \
+  iptables -I FORWARD -d $CGNAT_SUBNET -j ACCEPT
+# TODO need IPv6 equivalent
+
+#"-i lo" is often used for a rule, but 127.0.0.1 and ::1 now exist on more than just lo
+iptables -C INPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT || (iptables -I INPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT && echo "FIXME: redo iptables rules to include this by default")
+ip6tables -C INPUT -s ::1 -d ::1 -j ACCEPT || (ip6tables -I INPUT -s ::1 -d ::1 -j ACCEPT && echo "FIXME: redo ip6tables rules to include this by default")
+
+
+
+##### REORDER ROUTING POLICY DATABASE (RPDB) ENTRIES #####
+
+# Table local must go after the automatic l3mdev table, which defaults to 1000. Standard for a VRF configuration.
+ip rule add pref 32765 from all lookup local || true
+ip rule del pref 0 from all lookup local || true
+ip -6 rule add pref 32765 from all lookup local || true
+ip -6 rule del pref 0 from all lookup local || true
+
+
+
+##### SET UP VRF AND ADDRESSING #####
+
+# Set up VRF using a table number outside the typical range.
+vrftable=$(($uid<<16))
+ip link add dev vrf$uid type vrf table $vrftable
+
+#127.0.0.1 and ::1 need to exist within the VRF so that processes within the VRF can talk to it
+ip addr add 127.0.0.1/8 dev vrf$uid scope host
+ip -6 addr add ::1/128 dev vrf$uid scope host || (echo -e "Probably hitting a bug that is fixed in newer kernels: https://patchwork.ozlabs.org/project/netdev/patch/20180919125653.15913-1-mmanning@vyatta.att-mail.com/\n\"Fixing\" this in a terrible way: disabling ipv6 completely so nothing uses it"; sysctl -w net.ipv6.conf.all.disable_ipv6=1; sysctl -w net.ipv6.conf.default.disable_ipv6=1;)
+
+# Calculate VRF-specific IP address used for NAT purposes.
+#
+# I could have a better assignment system but this works to use the CGN
+# allocation with a UID (assuming 22 bit max). For once, my usage of the CGN
+# NAT range fully complies with RFC 6598: "Shared Address Space can be used as
+# additional non-globally routable space on routing equipment that is able to
+# do address translation across router interfaces when the addresses are
+# identical on two different interfaces." This is definitely 1) equipment that
+# 2) routes and 3) is able to do address translation 4) across router
+# interfaces 5) when the addresses are identical on two different interfaces.
+vrf_nat_ip=$(inet_ntoa $(($(inet_aton $CGNET_SUBNET_START_IP) | $uid)))
+
+
+
+##### SET UP NAT ADDRESSES AND ROUTES FOR THE VRF #####
+
+# Add /32 IP address used for connecting off-subnet. Used for NAT.
+ip addr add $vrf_nat_ip/32 dev vrf$uid scope host    #relevant routes are added in the VRF's table
+ip route add $vrf_nat_ip/32 dev vrf$uid scope host   #add relevant route to table main
+# TODO need IPv6 equivalent
+# TODO need IPv6 equivalent
+
+# Add a default route going out the interface in the default VRF, src of my VRF IP
+ip route add table $vrftable default dev $default_out_interface src $vrf_nat_ip
+# TODO need IPv6 equivalent
+
+
+
+##### SET UP VXLAN INTERFACES #####
+
+# Loop through interfaces and create a matching vxlan interface
+for ((i=0; i < ${#list_interfaces[@]}; i++))
+do
+	vxlan_interface="${list_interfaces[$i]}u$uid"
+
+	#Create interface after checking if it already exists (e.g. multiple addresses on the same interface)
+	ip link show $vxlan_interface >/dev/null 2>&1 || \
+	  ip link add $vxlan_interface type vxlan group $MULTICAST_IP dev ${list_interfaces[$i]} ttl 5 id $uid dstport ${list_dstports[$i]} noudpcsum noudp6zerocsumtx noudp6zerocsumrx
+
+	#Assign interface to VRF
+	ip link set dev $vxlan_interface master vrf$uid
+
+	#Add the address to the interface
+	ip addr add ${list_addresses[$i]} dev $vxlan_interface
+
+	ip link set $vxlan_interface up
+done
+
+
+
+##### BRING IT ALL UP #####
+
+# Bring up the VRF. Routing is live.
+ip link set vrf$uid up
+
+# We've been busy. Let's make sure that caches get updated.
+ip route flush cache
+
+# Force the cgroup entry to be created. For some reason this seems necessary,
+# and there seems to be more to it than just running mkdir. TODO: check if true
+ip vrf exec vrf$uid true
+
+
+
+##### UNLOCK #####
+
+# Create "ready" dir and remove lock dir. Order matters. It's OK to have both
+# directories exist at the same time, but it's bad if neither exist and a new
+# session checks for the directories at that exact moment.
+mkdir -- "$state_dir_ready"
+rmdir -- "$state_dir_wip"
+
+
+
+##### MOVE PARENT PROCESS INTO VRF #####
+
+move_process_to_vrfname $pid vrf$uid

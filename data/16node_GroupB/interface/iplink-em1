@@ -1,0 +1,1 @@
+2: em1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9000 qdisc mq state UP mode DEFAULT group default qlen 1000\    link/ether 7c:d3:0a:ba:6c:22 brd ff:ff:ff:ff:ff:ff

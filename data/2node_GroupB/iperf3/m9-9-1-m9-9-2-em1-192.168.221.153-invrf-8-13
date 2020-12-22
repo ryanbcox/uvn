@@ -1,0 +1,10 @@
+Connecting to host 192.168.221.153, port 5207
+[  6] local 192.168.221.152 port 46434 connected to 192.168.221.153 port 5207
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  6]   0.00-60.00  sec  8.60 GBytes  1.23 Gbits/sec    0   1017 KBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  6]   0.00-60.00  sec  8.60 GBytes  1.23 Gbits/sec    0             sender
+[  6]   0.00-60.03  sec  8.60 GBytes  1.23 Gbits/sec                  receiver
+
+iperf Done.

@@ -1,0 +1,9 @@
+iface,vrf,ppn,gflops
+default,invrf,40,3332.5
+default,novrf,40,3344.1
+em1,invrf,40,3229.8
+em1,novrf,40,3257.5
+ib0,invrf,40,3237
+ib0,novrf,40,3241.1
+ib1,invrf,40,3225
+ib1,novrf,40,3236.2

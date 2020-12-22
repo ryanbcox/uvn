@@ -1,0 +1,10 @@
+Connecting to host 192.168.128.28, port 5203
+[  6] local 192.168.128.26 port 41518 connected to 192.168.128.28 port 5203
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  6]   0.00-120.00 sec  70.9 GBytes  5.08 Gbits/sec    1   3.12 MBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  6]   0.00-120.00 sec  70.9 GBytes  5.08 Gbits/sec    1             sender
+[  6]   0.00-120.03 sec  70.9 GBytes  5.08 Gbits/sec                  receiver
+
+iperf Done.
